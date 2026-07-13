@@ -98,6 +98,8 @@ interface ISCMRepositoryView {
 	readonly discoveryTime: number;
 	focused: boolean;
 	selectionIndex: number;
+	hasChanges: boolean;
+	readonly disposables: DisposableStore;
 }
 
 export interface ISCMViewServiceState {
@@ -122,9 +124,23 @@ export class SCMViewService implements ISCMViewService {
 
 	private _repositories: ISCMRepositoryView[] = [];
 
-	get repositories(): ISCMRepository[] {
+	private get hideCleanRepositories(): boolean {
+		return this.configurationService.getValue<boolean>('scm.repositories.hideClean') === true;
+	}
+
+	private get allNonHiddenRepositories(): ISCMRepository[] {
 		return this._repositories
 			.filter(r => r.repository.provider.isHidden !== true)
+			.map(r => r.repository);
+	}
+
+	private isRepositoryViewFiltered(repositoryView: ISCMRepositoryView): boolean {
+		return repositoryView.repository.provider.isHidden === true || (this.hideCleanRepositories && !repositoryView.hasChanges);
+	}
+
+	get repositories(): ISCMRepository[] {
+		return this._repositories
+			.filter(r => !this.isRepositoryViewFiltered(r))
 			.map(r => r.repository);
 	}
 
@@ -135,13 +151,13 @@ export class SCMViewService implements ISCMViewService {
 		// the visible repositories are sorted by the selection index instead of the discovery time.
 		if (this._repositoriesSortKey === ISCMRepositorySortKey.DiscoveryTime) {
 			return this._repositories
-				.filter(r => r.repository.provider.isHidden !== true && r.selectionIndex !== -1)
+				.filter(r => !this.isRepositoryViewFiltered(r) && r.selectionIndex !== -1)
 				.sort((r1, r2) => r1.selectionIndex - r2.selectionIndex)
 				.map(r => r.repository);
 		}
 
 		return this._repositories
-			.filter(r => r.repository.provider.isHidden !== true && r.selectionIndex !== -1)
+			.filter(r => !this.isRepositoryViewFiltered(r) && r.selectionIndex !== -1)
 			.map(r => r.repository);
 	}
 
@@ -172,8 +188,8 @@ export class SCMViewService implements ISCMViewService {
 		this._onDidSetVisibleRepositories.fire({ added, removed });
 
 		// Update focus if the focused repository is not visible anymore
-		if (this._repositories.find(r => r.focused && r.selectionIndex === -1)) {
-			this.focus(this._repositories.find(r => r.selectionIndex !== -1)?.repository);
+		if (this._repositories.find(r => r.focused && !this.isVisible(r.repository))) {
+			this.focus(this.visibleRepositories[0]);
 		}
 	}
 
@@ -329,6 +345,12 @@ export class SCMViewService implements ISCMViewService {
 			this._selectionModelContextKey.set(selectionMode);
 		}));
 
+		this.disposables.add(this.configurationService.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration('scm.repositories.hideClean')) {
+				this.onDidChangeHideCleanRepositories();
+			}
+		}));
+
 		scmService.onDidAddRepository(this.onDidAddRepository, this, this.disposables);
 		scmService.onDidRemoveRepository(this.onDidRemoveRepository, this, this.disposables);
 
@@ -353,8 +375,11 @@ export class SCMViewService implements ISCMViewService {
 		}
 
 		const repositoryView = {
-			repository, discoveryTime: Date.now(), focused: false, selectionIndex: -1
+			repository, discoveryTime: Date.now(), focused: false, selectionIndex: -1, hasChanges: this.hasChanges(repository), disposables: new DisposableStore()
 		} satisfies ISCMRepositoryView;
+
+		repositoryView.disposables.add(repository.provider.onDidChangeResources(() => this.onDidChangeRepositoryResources(repositoryView)));
+		repositoryView.disposables.add(repository.provider.onDidChangeResourceGroups(() => this.onDidChangeRepositoryResources(repositoryView)));
 
 		let removed: Iterable<ISCMRepository> = Iterable.empty();
 
@@ -379,7 +404,7 @@ export class SCMViewService implements ISCMViewService {
 						repositoryView.selectionIndex = index;
 					});
 
-					this._onDidChangeRepositories.fire({ added, removed: Iterable.empty() });
+					this.fireDidChangeRepositories({ added, removed: Iterable.empty() });
 				}
 
 				this.didSelectRepository = false;
@@ -390,7 +415,7 @@ export class SCMViewService implements ISCMViewService {
 				// Explicit selection started
 				if (this.didSelectRepository) {
 					this.insertRepositoryView(this._repositories, repositoryView);
-					this._onDidChangeRepositories.fire({ added: Iterable.empty(), removed: Iterable.empty() });
+					this.fireDidChangeRepositories({ added: Iterable.empty(), removed: Iterable.empty() });
 					return;
 				}
 			} else {
@@ -411,11 +436,11 @@ export class SCMViewService implements ISCMViewService {
 			// Multiple selection mode or single selection mode (select first repository)
 			const maxSelectionIndex = this.getMaxSelectionIndex();
 			this.insertRepositoryView(this._repositories, { ...repositoryView, selectionIndex: maxSelectionIndex + 1 });
-			this._onDidChangeRepositories.fire({ added: [repositoryView.repository], removed });
+			this.fireDidChangeRepositories({ added: [repositoryView.repository], removed });
 		} else {
 			// Single selection mode (add subsequent repository)
 			this.insertRepositoryView(this._repositories, repositoryView);
-			this._onDidChangeRepositories.fire({ added: Iterable.empty(), removed });
+			this.fireDidChangeRepositories({ added: Iterable.empty(), removed });
 		}
 
 		// Focus repository if nothing is focused
@@ -436,14 +461,20 @@ export class SCMViewService implements ISCMViewService {
 		}
 
 		let added: Iterable<ISCMRepository> = Iterable.empty();
+		const wasVisible = this.isVisible(repository);
 		const removed = this._repositories.splice(repositoriesIndex, 1);
+		removed[0].disposables.dispose();
 
 		if (this._repositories.length > 0 && this.visibleRepositories.length === 0) {
-			this._repositories[0].selectionIndex = 0;
-			added = [this._repositories[0].repository];
+			const repository = this.repositories[0];
+			const repositoryView = this._repositories.find(r => r.repository === repository);
+			if (repositoryView) {
+				repositoryView.selectionIndex = 0;
+				added = [repositoryView.repository];
+			}
 		}
 
-		this._onDidChangeRepositories.fire({ added, removed: removed.map(r => r.repository) });
+		this.fireDidChangeRepositories({ added, removed: wasVisible ? removed.map(r => r.repository) : Iterable.empty() });
 
 		// Check if the focused repository was removed
 		if (removed.length === 1 && removed[0].focused && this.visibleRepositories.length > 0) {
@@ -462,7 +493,8 @@ export class SCMViewService implements ISCMViewService {
 	}
 
 	isVisible(repository: ISCMRepository): boolean {
-		return this._repositories.find(r => r.repository === repository)?.selectionIndex !== -1;
+		const repositoryView = this._repositories.find(r => r.repository === repository);
+		return repositoryView !== undefined && !this.isRepositoryViewFiltered(repositoryView) && repositoryView.selectionIndex !== -1;
 	}
 
 	toggleVisibility(repository: ISCMRepository, visible?: boolean): void {
@@ -495,7 +527,7 @@ export class SCMViewService implements ISCMViewService {
 		this._sortKeyContextKey.set(this._repositoriesSortKey);
 		this._repositories.sort(this.compareRepositories.bind(this));
 
-		this._onDidChangeRepositories.fire({ added: Iterable.empty(), removed: Iterable.empty() });
+		this.fireDidChangeRepositories({ added: Iterable.empty(), removed: Iterable.empty() });
 	}
 
 	toggleSelectionMode(selectionMode: 'multiple' | 'single'): void {
@@ -516,6 +548,61 @@ export class SCMViewService implements ISCMViewService {
 
 	pinActiveRepository(repository: ISCMRepository | undefined): void {
 		this._activeRepositoryPinnedObs.set(repository, undefined);
+	}
+
+
+	private fireDidChangeRepositories(event: ISCMViewVisibleRepositoryChangeEvent): void {
+		const added = [...event.added].filter(repository => this.isVisible(repository));
+		this._onDidChangeRepositories.fire({ added, removed: event.removed });
+	}
+
+	private hasChanges(repository: ISCMRepository): boolean {
+		return repository.provider.groups.some(group => group.resources.length > 0);
+	}
+
+	private onDidChangeRepositoryResources(repositoryView: ISCMRepositoryView): void {
+		const hadChanges = repositoryView.hasChanges;
+		const wasVisible = this.isVisible(repositoryView.repository);
+		repositoryView.hasChanges = this.hasChanges(repositoryView.repository);
+		const isVisible = this.isVisible(repositoryView.repository);
+
+		if (hadChanges === repositoryView.hasChanges && wasVisible === isVisible) {
+			return;
+		}
+
+		this.fireDidChangeRepositories({
+			added: !wasVisible && isVisible ? [repositoryView.repository] : Iterable.empty(),
+			removed: wasVisible && !isVisible ? [repositoryView.repository] : Iterable.empty()
+		});
+
+		if (repositoryView.focused && !isVisible) {
+			this.focus(this.visibleRepositories[0]);
+		}
+	}
+
+	private onDidChangeHideCleanRepositories(): void {
+		const added: ISCMRepository[] = [];
+		const removed: ISCMRepository[] = [];
+
+		for (const repositoryView of this._repositories) {
+			if (repositoryView.repository.provider.isHidden === true || repositoryView.hasChanges) {
+				continue;
+			}
+
+			if (repositoryView.selectionIndex !== -1) {
+				if (this.hideCleanRepositories) {
+					removed.push(repositoryView.repository);
+				} else {
+					added.push(repositoryView.repository);
+				}
+			}
+		}
+
+		this.fireDidChangeRepositories({ added, removed });
+
+		if (this._repositories.find(r => r.focused && !this.isVisible(r.repository))) {
+			this.focus(this.visibleRepositories[0]);
+		}
 	}
 
 	private compareRepositories(op1: ISCMRepositoryView, op2: ISCMRepositoryView): number {
@@ -571,8 +658,11 @@ export class SCMViewService implements ISCMViewService {
 			return;
 		}
 
-		const all = this.repositories.map(r => getProviderStorageKey(r.provider));
-		const visible = this.visibleRepositories.map(r => all.indexOf(getProviderStorageKey(r.provider)));
+		const all = this.allNonHiddenRepositories.map(r => getProviderStorageKey(r.provider));
+		const visible = this._repositories
+			.filter(r => r.repository.provider.isHidden !== true && r.selectionIndex !== -1)
+			.map(r => all.indexOf(getProviderStorageKey(r.repository.provider)))
+			.filter(index => index !== -1);
 		this.previousState = { all, visible, sortKey: this._repositoriesSortKey } satisfies ISCMViewServiceState;
 
 		this.storageService.store('scm:view:visibleRepositories', JSON.stringify(this.previousState), StorageScope.WORKSPACE, StorageTarget.MACHINE);
@@ -592,6 +682,7 @@ export class SCMViewService implements ISCMViewService {
 	}
 
 	dispose(): void {
+		this._repositories.forEach(r => r.disposables.dispose());
 		this.disposables.dispose();
 		this._onDidFocusRepository.dispose();
 		this._onDidChangeRepositories.dispose();

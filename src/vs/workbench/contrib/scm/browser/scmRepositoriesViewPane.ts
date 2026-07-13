@@ -520,6 +520,12 @@ export class SCMRepositoriesViewPane extends ViewPane {
 					await this.treeOperationSequencer.queue(() => this.updateTreeSelection());
 				}));
 
+				// Update tree children when repository order or effective visibility changes.
+				this.visibilityDisposables.add(this.scmViewService.onDidChangeRepositories(async () => {
+					await this.updateChildren();
+					this.updateBodySize(this.tree.contentHeight);
+				}));
+
 				// Add/Remove event handlers
 				this.scmService.onDidAddRepository(this.onDidAddRepository, this, this.visibilityDisposables);
 				this.scmService.onDidRemoveRepository(this.onDidRemoveRepository, this, this.visibilityDisposables);

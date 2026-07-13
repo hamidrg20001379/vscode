@@ -336,6 +336,11 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			description: localize('providersVisible', "Controls how many repositories are visible in the Source Control Repositories section. Set to 0, to be able to manually resize the view."),
 			default: 10
 		},
+		'scm.repositories.hideClean': {
+			type: 'boolean',
+			description: localize('repositoriesHideClean', "Controls whether repositories with no pending changes are hidden from Source Control repository lists."),
+			default: false
+		},
 		'scm.repositories.selectionMode': {
 			type: 'string',
 			enum: ['multiple', 'single'],
