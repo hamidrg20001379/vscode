@@ -15,7 +15,6 @@ permissions:
   contents: read
 
 env:
-  ELECTRON_SKIP_BINARY_DOWNLOAD: 1
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
   VSCODE_QUALITY: oss
 
@@ -44,6 +43,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
         env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Typecheck client
@@ -51,3 +51,58 @@ jobs:
 
       - name: Build client
         run: npm run compile-client
+  windows-exe:
+    name: Build Windows x64 installer
+    runs-on: windows-2022
+    env:
+      NPM_ARCH: x64
+      VSCODE_ARCH: x64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          lfs: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        shell: pwsh
+        run: npm ci
+        env:
+          npm_config_arch: ${{ env.NPM_ARCH }}
+          npm_config_foreground_scripts: 'true'
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Electron
+        shell: pwsh
+        run: npm run gulp "electron $env:VSCODE_ARCH"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Windows app
+        shell: pwsh
+        run: npm run gulp "vscode-win32-$env:VSCODE_ARCH"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add Windows updater helper
+        shell: pwsh
+        run: npm run gulp "vscode-win32-$env:VSCODE_ARCH-inno-updater"
+
+      - name: Build Windows user setup executable
+        shell: pwsh
+        run: npm run gulp "vscode-win32-$env:VSCODE_ARCH-user-setup"
+
+      - name: Upload Windows setup executable
+        uses: actions/upload-artifact@v6
+        with:
+          name: vscode-win32-x64-user-setup
+          path: .build/win32-x64/user-setup/*.exe
+          if-no-files-found: error
